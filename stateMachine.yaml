@@ -1,0 +1,202 @@
+﻿AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: An AWS Serverless Specification template describing your function.
+Parameters:
+  CloudSearchDomain:
+    Type: String
+Resources:
+  startStateMachine:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.start_state_machine
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Policies: AWSStepFunctionsFullAccess
+      Timeout: 3
+      Environment:
+        Variables:
+          stateMachineArn: !Ref docStateMachine
+      Tags:
+        usage: aws-user-group-14
+      Events:
+        PhotoUpload:
+          Type: S3
+          Properties:
+            Bucket: !Ref textFile
+            Events: s3:ObjectCreated:*
+  textFile:
+    Type: AWS::S3::Bucket
+  saveNewCandidate:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.saveNewCandidate
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Timeout: 3
+      Policies: AmazonDynamoDBFullAccess
+      Environment:
+        Variables:
+          metadataDBName: !Ref metadataDB
+      Tags:
+        usage: aws-user-group-14
+  extractEmail:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.extract_email
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Timeout: 3
+      Tags:
+        usage: aws-user-group-14
+  extractName:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.extract_name
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Timeout: 3
+      Tags:
+        usage: aws-user-group-14
+  consolidateData:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.consolidate_data
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Timeout: 3
+      Tags:
+        usage: aws-user-group-14
+  generateUID:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.generate_uid
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Policies:
+        - AmazonDynamoDBReadOnlyAccess
+        - AmazonS3ReadOnlyAccess
+      Timeout: 3
+      Environment:
+        Variables:
+          metadataDBName: !Ref metadataDB
+      Tags:
+        usage: aws-user-group-14
+  indexDoc:
+    Type: 'AWS::Serverless::Function'
+    Properties:
+      Handler: index.index_doc
+      Runtime: nodejs6.10
+      Description: ''
+      MemorySize: 128
+      Policies: AmazonS3ReadOnlyAccess
+      Timeout: 10
+      Environment:
+        Variables:
+          docIndexerUri: !Ref CloudSearchDomain
+      Tags:
+        usage: aws-user-group-14
+  StatesExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+  metadataDB:
+    Type: AWS::Serverless::SimpleTable
+    Properties:
+      PrimaryKey:
+        Name: uid
+        Type: String
+  docStateMachine:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      DefinitionString: !Sub |
+        {
+          "Comment": "Doc indexation example of the Amazon States Language using an AWS Lambda Function",
+          "StartAt": "GenerateUID",
+          "States": {
+            "GenerateUID": {
+              "Type": "Task",
+              "Resource": "${generateUID.Arn}",
+              "Next": "IsNewCandidate"
+            },
+            "IsNewCandidate": {
+              "Type" : "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.isNew",
+                  "NumericEquals": 1,
+                  "Next": "Parallel"
+                },
+                {
+                  "Variable": "$.isNew",
+                  "NumericEquals": 0,
+                  "Next": "IndexCV"
+                }
+              ]
+            },
+            "Parallel": {
+              "Type": "Parallel",
+              "Next": "MergeResult",
+              "Branches": [
+                {
+                  "StartAt": "ExtractName",
+                  "States": {
+                    "ExtractName": {
+                      "Type": "Task",
+                      "Resource": "${extractName.Arn}",
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "ExtractEmail",
+                  "States": {
+                    "ExtractEmail": {
+                      "Type": "Task",
+                      "Resource": "${extractEmail.Arn}",
+                      "End": true
+                    }
+                  }
+                }
+              ]
+            },
+            "MergeResult": {
+              "Type": "Task",
+              "Resource": "${consolidateData.Arn}",
+              "Next": "SaveNewCandidate"
+            },
+            "SaveNewCandidate": {
+              "Type": "Task",
+              "Resource": "${saveNewCandidate.Arn}",
+              "Next": "IndexCV"
+            },
+            "IndexCV": {
+              "Type": "Task",
+              "Resource": "${indexDoc.Arn}",
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt [ StatesExecutionRole, Arn ]
